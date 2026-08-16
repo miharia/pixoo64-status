@@ -426,6 +426,17 @@ def _is_night(start, end):
     return cur >= s0 or cur < e0
 
 
+# 可回读验证的设置：命令参数键 -> Channel/GetAllConf 里的字段
+_VERIFY = {
+    "brightness": ("Brightness", "Brightness"),
+    "screen_on": ("OnOff", "LightSwitch"),
+    "rotation": ("Mode", "GyrateAngle"),
+    "mirror": ("Mode", "MirrorFlag"),
+    "hour_mode": ("Mode", "Time24Flag"),
+    "temp_unit": ("Mode", "TemperatureMode"),
+}
+
+
 def _apply_settings(force=False):
     """把网页上配置过的设备设置推给 Pixoo；自动亮度/夜间关屏也会在这里生效。"""
     with _lock:
@@ -500,11 +511,30 @@ def _apply_settings(force=False):
         sig = f"{key}:{ip}"
         if not force and _applied_settings.get(sig) == variants:
             continue
-        try:
-            _pixoo_command(variants, ip=ip)
-            _applied_settings[sig] = variants
-        except Exception:
-            pass
+        param_key = None
+        conf_key = None
+        if key in _VERIFY:
+            param_key, conf_key = _VERIFY[key]
+        want = variants[0][1].get(param_key) if param_key else None
+        # 设备刚收完动画帧时偶尔会静默丢命令（返回 error_code 0 但没生效），
+        # 所以下发后回读设备配置验证，不一致就稍等重试
+        for attempt in range(4):
+            try:
+                _pixoo_command(variants, ip=ip)
+                if param_key is not None:
+                    time.sleep(0.4)
+                    resp = _http_post_json(
+                        f"http://{ip}/post", {"Command": "Channel/GetAllConf"})
+                    if resp.get(conf_key) == want:
+                        _applied_settings[sig] = variants
+                        break
+                else:
+                    _applied_settings[sig] = variants
+                    break
+            except Exception:
+                pass
+            if attempt < 3:
+                time.sleep(0.8)
 
 
 def _next_text_id():
@@ -772,6 +802,9 @@ def push_pattern(status, index):
     name, gen, speed = pats[index]
     frames = gen()
     ok = push_animation(frames, speed)
+    if ok:
+        # 设备刚收完动画帧时容易丢紧随其后的命令，稍等让它消化
+        time.sleep(0.3)
     with _lock:
         _state["status"] = status
         _state["pattern"] = index
@@ -786,6 +819,8 @@ def apply_status(status):
     with _lock:
         _state["mode"] = "pattern"
         _state["notify"] = None
+        _state["countdown"] = None
+        _state["stopwatch_running"] = False
     save_state()
     return push_pattern(status, 0)
 
@@ -939,11 +974,22 @@ def public_state():
             "countdown": _state.get("countdown"),
             "stopwatch_running": _state.get("stopwatch_running", False),
             "scoreboard": _state.get("scoreboard", {"blue": 0, "red": 0}),
-            "settings": _state.get("settings", {}),
+            "settings": dict(_state.get("settings", {})),
             "settings_touched": _state.get("settings_touched", []),
-            "auto": _state.get("auto", {}),
+            "auto": dict(_state.get("auto", {})),
             "update_enabled": bool(UPDATE_URL),
         }
+    auto = d["auto"]
+    if auto.get("enabled"):
+        night = _is_night(auto.get("night_start", "22:00"), auto.get("night_end", "08:00"))
+        if night and auto.get("night_off"):
+            d["settings"]["screen_on"] = False
+        else:
+            d["settings"]["screen_on"] = True
+            d["settings"]["brightness"] = (
+                int(auto.get("night_brightness", 20)) if night
+                else int(auto.get("day_brightness", 100))
+            )
     d["pattern"] = pattern_info(d["status"])
     return d
 
@@ -1339,31 +1385,36 @@ HTML_PAGE = """<!DOCTYPE html>
     document.getElementById('updBtn').style.display = s.update_enabled ? '' : 'none';
     document.getElementById('preview').src = '/preview.png?t=' + Date.now();
 
-    const st = s.settings || {};
-    curScreen = st.screen_on !== false;
-    document.getElementById('bri').value = st.brightness ?? 100;
-    document.getElementById('briVal').textContent = (st.brightness ?? 100) + '%';
-    document.getElementById('screenBtn').textContent = curScreen ? '屏幕：开' : '屏幕：关';
-    document.getElementById('rotSel').value = st.rotation ?? 0;
-    document.getElementById('mirChk').checked = !!st.mirror;
-    const w = st.white_balance || [255,255,255];
-    document.getElementById('wbR').value = w[0];
-    document.getElementById('wbG').value = w[1];
-    document.getElementById('wbB').value = w[2];
-    wbLabel();
-    document.getElementById('hlChk').checked = !!st.high_light;
-    document.getElementById('hourSel').value = st.hour_mode ?? 24;
-    document.getElementById('tempSel').value = st.temp_unit ?? 0;
+    // 正在操作控件时不覆盖表单值，避免拖动/选择到一半被刷回去
+    const ae = document.activeElement;
+    const ctlBusy = ae && (ae.tagName === 'INPUT' || ae.tagName === 'SELECT');
+    if (!ctlBusy) {
+      const st = s.settings || {};
+      curScreen = st.screen_on !== false;
+      document.getElementById('bri').value = st.brightness ?? 100;
+      document.getElementById('briVal').textContent = (st.brightness ?? 100) + '%';
+      document.getElementById('screenBtn').textContent = curScreen ? '屏幕：开' : '屏幕：关';
+      document.getElementById('rotSel').value = st.rotation ?? 0;
+      document.getElementById('mirChk').checked = !!st.mirror;
+      const w = st.white_balance || [255,255,255];
+      document.getElementById('wbR').value = w[0];
+      document.getElementById('wbG').value = w[1];
+      document.getElementById('wbB').value = w[2];
+      wbLabel();
+      document.getElementById('hlChk').checked = !!st.high_light;
+      document.getElementById('hourSel').value = st.hour_mode ?? 24;
+      document.getElementById('tempSel').value = st.temp_unit ?? 0;
 
-    const au = s.auto || {};
-    document.getElementById('autoChk').checked = !!au.enabled;
-    document.getElementById('dayBri').value = au.day_brightness ?? 100;
-    document.getElementById('dayBriVal').textContent = (au.day_brightness ?? 100) + '%';
-    document.getElementById('nightBri').value = au.night_brightness ?? 20;
-    document.getElementById('nightBriVal').textContent = (au.night_brightness ?? 20) + '%';
-    document.getElementById('nightStart').value = au.night_start || '22:00';
-    document.getElementById('nightEnd').value = au.night_end || '08:00';
-    document.getElementById('nightOffChk').checked = !!au.night_off;
+      const au = s.auto || {};
+      document.getElementById('autoChk').checked = !!au.enabled;
+      document.getElementById('dayBri').value = au.day_brightness ?? 100;
+      document.getElementById('dayBriVal').textContent = (au.day_brightness ?? 100) + '%';
+      document.getElementById('nightBri').value = au.night_brightness ?? 20;
+      document.getElementById('nightBriVal').textContent = (au.night_brightness ?? 20) + '%';
+      document.getElementById('nightStart').value = au.night_start || '22:00';
+      document.getElementById('nightEnd').value = au.night_end || '08:00';
+      document.getElementById('nightOffChk').checked = !!au.night_off;
+    }
 
     const nt = s.notify;
     document.getElementById('ntStatus').textContent = nt
@@ -1377,26 +1428,23 @@ HTML_PAGE = """<!DOCTYPE html>
     document.getElementById('sbRed').textContent = sb.red;
     document.getElementById('sbBlue').textContent = sb.blue;
   }
-  async function saveConfig(settings, auto) {
-    const body = {};
-    if (settings) body.settings = settings;
-    if (auto) body.auto = auto;
+  async function saveConfig(body) {
     try {
-      const r = await post('/api/config', body);
+      const r = await post('/api/config', body || {});
       if (r && r.error) msg('设置失败：' + r.error);
       else msg('设置已应用');
     } catch (e) { msg('保存失败'); }
     refresh();
   }
   function saveAuto() {
-    saveConfig(null, {
+    saveConfig({auto: {
       enabled: document.getElementById('autoChk').checked,
       day_brightness: +document.getElementById('dayBri').value,
       night_brightness: +document.getElementById('nightBri').value,
       night_start: document.getElementById('nightStart').value,
       night_end: document.getElementById('nightEnd').value,
       night_off: document.getElementById('nightOffChk').checked
-    });
+    }});
   }
   async function toggleScreen() { saveConfig({settings:{screen_on: !curScreen}}); }
   async function sendNotify() {
@@ -1473,11 +1521,15 @@ HTML_PAGE = """<!DOCTYPE html>
     msg('正在检查更新…');
     try {
       const s = await post('/api/update', {});
-      if (s.enabled && s.result) {
-        try {
-          const j = JSON.parse(s.result);
-          msg((j.message || j.error || '已检查') + (s.status ? '（' + s.status + '）' : ''));
-        } catch (e) { msg(s.result); }
+      if (s.enabled) {
+        if (s.result) {
+          try {
+            const j = JSON.parse(s.result);
+            msg((j.message || j.error || '已检查') + (s.status ? '（' + s.status + '）' : ''));
+          } catch (e) { msg(s.result); }
+        } else {
+          msg('已检查更新' + (s.status ? '（' + s.status + '）' : ''));
+        }
       } else {
         msg(s.message || '未启用更新按钮');
       }
