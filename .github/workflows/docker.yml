@@ -1,8 +1,12 @@
+# 镜像标签规则：
+#   main 分支         -> :latest（稳定版，NAS 默认部署）
+#   测试分支           -> :test（测试版，NAS 可切过去试用）
+#   任意分支提交       -> :sha-<commit>（精确回滚点）
 name: Build & Push Docker Image
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/pixoo-features]
   workflow_dispatch:
 
 permissions:
@@ -39,7 +43,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64/v8
           tags: |
-            ${{ env.IMAGE }}:latest
             ${{ env.IMAGE }}:sha-${{ github.sha }}
+            ${{ github.ref_name == 'main' && format('{0}:latest', env.IMAGE) || format('{0}:test', env.IMAGE) }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
