@@ -56,6 +56,8 @@ _lock = threading.Lock()
 _state = {
     "status": "free",
     "device_ok": True,
+    # 是否自动接管设备：关闭后停止轮播/自动设置，避免打断其他应用
+    "running": True,
     "pattern": 0,
     "device_ip": PIXOO_IP,
     # 当前显示模式：pattern=状态图案 | countdown=倒计时 | stopwatch=秒表 | scoreboard=比分板
@@ -818,7 +820,7 @@ def load_state():
             data = json.load(f)
         if data.get("status") in VALID_STATUSES:
             _state["status"] = data["status"]
-        for k in ("device_ok", "pattern", "device_ip", "mode", "notify",
+        for k in ("device_ok", "running", "pattern", "device_ip", "mode", "notify",
                   "countdown", "stopwatch_running", "settings_touched"):
             if k in data:
                 _state[k] = data[k]
@@ -880,6 +882,25 @@ def apply_status(status):
         _state["stopwatch_running"] = False
     save_state()
     return push_pattern(status, 0)
+
+
+def set_running(running):
+    """开启/停止自动接管设备。停止后不再轮播、不再自动下发设置。"""
+    running = bool(running)
+    with _lock:
+        _state["running"] = running
+    save_state()
+    if running:
+        # 恢复时立刻同步一次当前状态和设置，避免设备长时间显示旧内容
+        with _lock:
+            status = _state["status"]
+            index = _state["pattern"]
+        push_pattern(status, index)
+        try:
+            _apply_settings()
+        except Exception:
+            pass
+    return running
 
 
 def apply_device_ip(ip):
@@ -956,8 +977,12 @@ def _main_loop():
         time.sleep(1)
         now = time.time()
         with _lock:
+            running = _state.get("running", True)
             mode = _state.get("mode", "pattern")
             notify = _state.get("notify")
+        if not running:
+            # 已停止：不自动推送任何内容，把设备让给其他应用
+            continue
         try:
             if notify:
                 if now >= notify.get("until", 0):
@@ -1014,7 +1039,10 @@ def _settings_loop():
     while True:
         time.sleep(30)
         try:
-            _apply_settings()
+            with _lock:
+                running = _state.get("running", True)
+            if running:
+                _apply_settings()
         except Exception:
             pass
 
@@ -1025,6 +1053,7 @@ def public_state():
         d = {
             "status": _state["status"],
             "device_ok": _state.get("device_ok", True),
+            "running": _state.get("running", True),
             "device_ip": _state.get("device_ip", ""),
             "mode": _state.get("mode", "pattern"),
             "notify": _state.get("notify"),
@@ -1221,6 +1250,19 @@ HTML_PAGE = """<!DOCTYPE html>
     padding: 10px 14px; border-radius: 12px; font-size: 13px; margin: 12px 0;
   }
   .banner.show { display: block; }
+  button.run-toggle {
+    flex: 1; border: 1px solid var(--line); border-radius: 14px; padding: 14px 10px;
+    font-size: 15px; font-weight: 700; letter-spacing: 1px; cursor: pointer;
+    color: #fff; background: #2a2440; transition: filter .12s ease;
+  }
+  button.run-toggle.stop { background: linear-gradient(160deg, #7a3040, #4a1d28); border-color: transparent; }
+  button.run-toggle.start { background: linear-gradient(160deg, #22a06b, #11623f); border-color: transparent; }
+  button.run-toggle:hover { filter: brightness(1.15); }
+  .stop-note {
+    display: none; color: #e8c86a; background: #3a331b; border: 1px solid #6b5a25;
+    padding: 10px 14px; border-radius: 12px; font-size: 13px; margin: 12px 0;
+  }
+  .stop-note.show { display: block; }
   button.busy, button.free { opacity: .66; }
   button.busy.active, button.free.active {
     opacity: 1; box-shadow: 0 0 0 2px rgba(255,255,255,.5) inset;
@@ -1267,6 +1309,10 @@ HTML_PAGE = """<!DOCTYPE html>
     <button class="busy" id="busyBtn" onclick="setStatus('busy')">请勿打扰</button>
     <button class="free" id="freeBtn" onclick="setStatus('free')">可以找我</button>
   </div>
+  <div class="row" style="margin-top:0">
+    <button class="run-toggle" id="runBtn" onclick="toggleRunning()">停止自动更新</button>
+  </div>
+  <div class="stop-note" id="stopNote">已停止自动更新：设备不会再被轮播/自动设置打断，可以放心用其他应用操作它。</div>
   <div class="settings">
     <input id="ip" placeholder="Pixoo 设备 IP，例如 192.168.1.100" spellcheck="false">
     <button class="small" onclick="saveIp()">保存设备</button>
@@ -1467,6 +1513,7 @@ HTML_PAGE = """<!DOCTYPE html>
 <script>
   let cur = null;
   let curScreen = true;
+  let sRunning = true;
   let toastTimer = null;
   async function post(path, body) {
     const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
@@ -1509,6 +1556,11 @@ HTML_PAGE = """<!DOCTYPE html>
     } else {
       banner.classList.remove('show');
     }
+    sRunning = s.running !== false;
+    const runBtn = document.getElementById('runBtn');
+    runBtn.textContent = sRunning ? '停止自动更新' : '恢复自动更新';
+    runBtn.className = 'run-toggle ' + (sRunning ? 'stop' : 'start');
+    document.getElementById('stopNote').classList.toggle('show', !sRunning);
     if (!s.device_ip) {
       document.getElementById('label').textContent = '未配置设备 IP';
       document.getElementById('device').textContent = '请在下方填写';
@@ -1661,6 +1713,13 @@ HTML_PAGE = """<!DOCTYPE html>
     }
   }
   async function backToPattern() { await post('/api/mode', {mode:'pattern'}); refresh(); }
+  async function toggleRunning() {
+    try {
+      const r = await post('/api/running', {running: !sRunning});
+      msg(r.ok ? (r.running ? '已恢复自动更新' : '已停止自动更新') : '操作失败：' + (r.error || ''));
+    } catch (e) { msg('请求失败'); }
+    refresh();
+  }
   async function saveIp() {
     const ip = document.getElementById('ip').value.trim();
     if (!ip) { msg('请填写设备 IP'); return; }
@@ -1813,6 +1872,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, json.dumps({"error": "mode must be pattern"}))
         elif self.path == "/api/discover":
             self._send(200, json.dumps(discover_devices()))
+        elif self.path == "/api/running":
+            raw = str(req.get("running", "true")).lower()
+            running = raw in ("1", "true", "yes", "on")
+            try:
+                set_running(running)
+                self._send(200, json.dumps({"ok": True, "running": running}))
+            except Exception as e:
+                self._send(200, json.dumps({"ok": False, "running": running, "error": str(e)}))
         elif self.path == "/api/update":
             self._send(200, json.dumps(trigger_update()))
         else:
