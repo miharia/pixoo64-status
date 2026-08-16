@@ -68,7 +68,7 @@ docker compose up -d
 ```
 
 `docker compose up -d` 会同时启动状态服务和 Watchtower。
-浏览器打开 `http://<NAS 的局域网 IP>:8000` 即可使用。
+浏览器打开 `http://<NAS 的局域网 IP>:10004` 即可使用。
 
 状态和预览图会持久化在宿主机 `./data` 目录，容器重启、升级都不会丢。
 也可以用 `docker compose up -d` 随时手动拉取最新镜像。

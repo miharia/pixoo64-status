@@ -9,7 +9,8 @@ services:
     container_name: pixoo-status
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # 宿主端口 10004，容器内部固定 8000
+      - "10004:8000"
     environment:
       # 设备 IP 在网页上配置，不在此处写死
       STATUS_PORT: "8000"
