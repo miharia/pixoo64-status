@@ -1209,10 +1209,45 @@ HTML_PAGE = """<!DOCTYPE html>
     background: #0e1122; border: 1px solid var(--line); border-radius: 10px;
     padding: 10px; font-size: 12px; max-height: 170px; overflow: auto; margin-top: 10px;
   }
+  .toast {
+    position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
+    background: #2f6bff; color: #fff; padding: 10px 16px; border-radius: 12px;
+    font-size: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.45); opacity: 0;
+    transition: opacity .2s ease; pointer-events: none; z-index: 10; max-width: 90vw;
+  }
+  .toast.show { opacity: 1; }
+  .banner {
+    display: none; background: #3a1c22; border: 1px solid #7a3040; color: #ffd7dc;
+    padding: 10px 14px; border-radius: 12px; font-size: 13px; margin: 12px 0;
+  }
+  .banner.show { display: block; }
+  button.busy, button.free { opacity: .66; }
+  button.busy.active, button.free.active {
+    opacity: 1; box-shadow: 0 0 0 2px rgba(255,255,255,.5) inset;
+  }
+  details.card { padding: 0; }
+  details.card > summary {
+    cursor: pointer; list-style: none; font-size: 15px; font-weight: 700;
+    color: #dfe4ff; padding: 16px 20px; user-select: none;
+  }
+  details.card > summary::-webkit-details-marker { display: none; }
+  details.card > summary::after { content: '▾'; float: right; color: #8b91b4; }
+  details.card[open] > summary::after { content: '▴'; }
+  details.card > .inner { padding: 0 20px 18px; }
+  input[type=range]:disabled, button:disabled { opacity: .45; cursor: not-allowed; }
   .meta { color: #8b91b4; font-size: 12px; margin-top: 14px; text-align: center; }
+  @media (max-width: 560px) {
+    body { padding: 12px; }
+    .grid { grid-template-columns: 1fr; }
+    .row { flex-direction: column; }
+    .card, details.card { padding: 16px; }
+    details.card > summary { padding: 14px 4px; }
+    details.card > .inner { padding: 0 4px 14px; }
+  }
 </style>
 </head>
 <body>
+<div class="toast" id="toast"></div>
 <div class="card">
   <h1>工作状态</h1>
   <div class="sub">当前状态会轮流播放多套图案显示在 Pixoo64 上</div>
@@ -1222,14 +1257,15 @@ HTML_PAGE = """<!DOCTYPE html>
     <span style="flex:1"></span>
     <span id="device" class="sub" style="margin:0"></span>
   </div>
+  <div class="banner" id="banner"></div>
   <div class="pattern">
     <span id="pattern"></span>
     <span id="modeStatus" style="color:#8b91b4;margin-left:10px"></span>
     <button class="small" id="modeBtn" onclick="backToPattern()" style="display:none;margin-left:8px">回到图案</button>
   </div>
   <div class="row">
-    <button class="busy" onclick="setStatus('busy')">请勿打扰</button>
-    <button class="free" onclick="setStatus('free')">可以找我</button>
+    <button class="busy" id="busyBtn" onclick="setStatus('busy')">请勿打扰</button>
+    <button class="free" id="freeBtn" onclick="setStatus('free')">可以找我</button>
   </div>
   <div class="settings">
     <input id="ip" placeholder="Pixoo 设备 IP，例如 192.168.1.100" spellcheck="false">
@@ -1242,8 +1278,9 @@ HTML_PAGE = """<!DOCTYPE html>
   <div class="meta">图案自动轮换 · 局域网内任意设备都能修改 · NAS 每 12 小时自动检查更新</div>
 </div>
 
-<div class="card">
-  <div class="sec-title">设备控制</div>
+<details class="card" open>
+  <summary>设备控制</summary>
+  <div class="inner">
   <div class="grid">
     <div class="field">
       <label>亮度 <span id="briVal" style="color:#cdd3f5"></span></label>
@@ -1293,10 +1330,13 @@ HTML_PAGE = """<!DOCTYPE html>
       </select>
     </div>
   </div>
-</div>
+  <div class="hint" id="autoHint"></div>
+  </div>
+</details>
 
-<div class="card">
-  <div class="sec-title">自动亮度 / 夜间关屏</div>
+<details class="card">
+  <summary>自动亮度 / 夜间关屏</summary>
+  <div class="inner">
   <div class="grid">
     <div class="field">
       <label class="chk"><input type="checkbox" id="autoChk" onchange="saveAuto()"> 启用自动模式</label>
@@ -1325,10 +1365,12 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </div>
   <div class="hint">自动模式开启后：白天用“白天亮度”，夜间用“夜间亮度”；勾选关闭屏幕则夜间直接熄屏，早上恢复。</div>
-</div>
+  </div>
+</details>
 
-<div class="card">
-  <div class="sec-title">滚动文字通知</div>
+<details class="card" open>
+  <summary>滚动文字通知</summary>
+  <div class="inner">
   <div class="grid">
     <div class="field" style="grid-column:1/-1">
       <label>通知文字</label>
@@ -1352,10 +1394,12 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
   </div>
   <div class="hint" id="ntStatus"></div>
-</div>
+  </div>
+</details>
 
-<div class="card">
-  <div class="sec-title">工具页（倒计时 / 秒表 / 比分板 / 蜂鸣器）</div>
+<details class="card">
+  <summary>工具页（倒计时 / 秒表 / 比分板 / 蜂鸣器）</summary>
+  <div class="inner">
   <div class="sec">
     <div class="sec-title" style="margin-top:0">倒计时</div>
     <div class="grid">
@@ -1409,22 +1453,36 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
     <div class="hint">蜂鸣器可能较响，注意别吓到人。</div>
   </div>
-</div>
+  </div>
+</details>
 
-<div class="card">
-  <div class="sec-title">天气（设备内置，需先在 Divoom App 绑定城市）</div>
+<details class="card">
+  <summary>天气（设备内置，需先在 Divoom App 绑定城市）</summary>
+  <div class="inner">
   <button class="btn" onclick="refreshWeather()">刷新天气</button>
   <pre class="wx" id="wxBox">点击上方按钮获取天气数据</pre>
-</div>
+  </div>
+</details>
 
 <script>
   let cur = null;
   let curScreen = true;
+  let toastTimer = null;
   async function post(path, body) {
     const r = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{})});
     return r.json();
   }
-  function msg(t) { document.getElementById('updMsg').textContent = t; }
+  function toast(t) {
+    const el = document.getElementById('toast');
+    el.textContent = t;
+    el.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function(){ el.classList.remove('show'); }, 2600);
+  }
+  function msg(t) {
+    document.getElementById('updMsg').textContent = t;
+    toast(t);
+  }
   function wb() {
     return [+document.getElementById('wbR').value, +document.getElementById('wbG').value, +document.getElementById('wbB').value];
   }
@@ -1439,6 +1497,18 @@ HTML_PAGE = """<!DOCTYPE html>
     cur = s.status;
     const dot = document.getElementById('dot');
     dot.className = 'dot ' + (s.device_ok ? cur : 'offline');
+    document.getElementById('busyBtn').classList.toggle('active', cur === 'busy');
+    document.getElementById('freeBtn').classList.toggle('active', cur === 'free');
+    const banner = document.getElementById('banner');
+    if (!s.device_ip) {
+      banner.textContent = '未配置 Pixoo 设备，请在下方填写 IP 并点“保存设备”。';
+      banner.classList.add('show');
+    } else if (!s.device_ok) {
+      banner.textContent = 'Pixoo 离线，改动会自动重试；请检查设备是否开机、IP 是否正确。';
+      banner.classList.add('show');
+    } else {
+      banner.classList.remove('show');
+    }
     if (!s.device_ip) {
       document.getElementById('label').textContent = '未配置设备 IP';
       document.getElementById('device').textContent = '请在下方填写';
@@ -1486,6 +1556,11 @@ HTML_PAGE = """<!DOCTYPE html>
       document.getElementById('nightStart').value = au.night_start || '22:00';
       document.getElementById('nightEnd').value = au.night_end || '08:00';
       document.getElementById('nightOffChk').checked = !!au.night_off;
+      const autoOn = !!au.enabled;
+      document.getElementById('bri').disabled = autoOn;
+      document.getElementById('screenBtn').disabled = autoOn;
+      document.getElementById('autoHint').textContent =
+        autoOn ? '自动模式已接管亮度和屏幕，取消勾选后可手动调节。' : '';
     }
 
     const nt = s.notify;
@@ -1564,8 +1639,14 @@ HTML_PAGE = """<!DOCTYPE html>
     msg('正在发现设备…');
     const r = await post('/api/discover', {});
     if (r.ok && r.devices && r.devices.length) {
-      document.getElementById('ip').value = r.devices[0].ip;
-      msg('发现 ' + r.devices.length + ' 台：' + r.devices.map(d => d.ip + (d.name ? '（' + d.name + '）' : '')).join('、'));
+      const first = r.devices[0];
+      document.getElementById('ip').value = first.ip;
+      if (r.devices.length === 1) {
+        msg('已发现 ' + first.ip + '，正在保存…');
+        await saveIp();
+      } else {
+        msg('发现 ' + r.devices.length + ' 台，已填入 ' + first.ip + '，请点保存设备');
+      }
     } else {
       msg('未发现设备：' + (r.error || '无结果'));
     }
