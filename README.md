@@ -42,12 +42,16 @@ python3 status_server.py
 
 推送到 GitHub 的 `main` 分支后，GitHub Actions 会自动构建 Docker
 镜像并推送到 `ghcr.io/miharia/pixoo64-status:latest`（同时支持
-amd64 / arm64）。NAS 上运行的 Watchtower 每 60 秒检查一次新镜像，
-发现更新就自动拉取并重启容器——之后的更新只需要：
+amd64 / arm64）。NAS 上运行的 Watchtower 每 12 小时检查一次新镜像，
+发现更新就自动拉取并重启容器；网页上也有“检查更新”按钮可以
+随时手动触发——之后的更新只需要：
 
 ```bash
 git add -A && git commit -m "改动" && git push
 ```
+
+部署完成后，第一次使用请打开网页，在“Pixoo 设备 IP”输入框里填上
+设备的局域网地址并点“保存设备”，之后状态切换才会推送到设备。
 
 NAS 端一次性配置：
 
@@ -57,9 +61,7 @@ NAS 端一次性配置：
    - 保持私有：在 NAS 上执行 `echo <GitHub 令牌> | docker login
      ghcr.io -u miharia --password-stdin`（令牌需要 `read:packages`
      权限）。
-2. 把仓库克隆/拷贝到 NAS 上，修改 `docker-compose.yml` 里的
-   `PIXOO_IP` 为你的 Pixoo64 地址；
-3. 在项目目录执行：
+2. 把仓库克隆/拷贝到 NAS 上，在项目目录执行：
 
 ```bash
 docker compose up -d
@@ -74,19 +76,25 @@ docker compose up -d
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `PIXOO_IP` | `192.168.1.100` | Pixoo64 局域网地址（示例，改成实际的） |
 | `STATUS_PORT` | `8000` | 网页端口 |
 | `STATUS_ROTATE` | `15` | 图案轮播间隔（秒） |
+| `UPDATE_URL` | `http://watchtower:8080/v1/update` | 网页更新按钮的转发地址 |
+| `UPDATE_TOKEN` | `pixoo-status-update` | 更新按钮与 Watchtower 的鉴权令牌 |
 | `STATE_FILE` | `/app/data/status.json` | 状态文件路径 |
 | `PREVIEW_FILE` | `/app/data/status_preview.png` | 预览图路径 |
+
+注意：Pixoo 设备 IP 不在 compose 里配置，打开网页填写即可，会保存在
+`./data/status.json` 中。
 
 ## 配置（直接运行时）
 
 可用环境变量覆盖默认值：
 
 ```bash
-PIXOO_IP=192.168.1.100 STATUS_PORT=8000 STATUS_ROTATE=15 python3 status_server.py
+STATUS_PORT=8000 STATUS_ROTATE=15 python3 status_server.py
 ```
+
+设备 IP 在网页上配置；也可以用 `PIXOO_IP` 环境变量作为首次启动的初始值。
 
 ## 文件
 

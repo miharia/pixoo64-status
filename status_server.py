@@ -22,10 +22,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-# 示例地址，请改成你设备实际的局域网 IP（部署到 NAS 时在 docker-compose 里配置）
-PIXOO_IP = os.environ.get("PIXOO_IP", "192.168.1.100")
+# 设备 IP 在网页端配置，这里只作为首次启动的可选初始值
+PIXOO_IP = os.environ.get("PIXOO_IP", "")
 PORT = int(os.environ.get("STATUS_PORT", "8000"))
 ROTATE_SECONDS = int(os.environ.get("STATUS_ROTATE", "15"))
+# 网页“检查更新”按钮转发到 Watchtower 的 HTTP API（Docker 部署时配置）
+UPDATE_URL = os.environ.get("UPDATE_URL", "")
+UPDATE_TOKEN = os.environ.get("UPDATE_TOKEN", "")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.environ.get(
     "STATE_FILE", os.path.join(BASE_DIR, "status.json"))
@@ -50,7 +53,12 @@ VALID_STATUSES = ("busy", "free")
 STATUS_TEXT = {"busy": "请勿打扰", "free": "可以找我"}
 
 _lock = threading.Lock()
-_state = {"status": "free", "device_ok": True, "pattern": 0}
+_state = {
+    "status": "free",
+    "device_ok": True,
+    "pattern": 0,
+    "device_ip": PIXOO_IP,
+}
 _gif_counter = 100
 
 
@@ -337,10 +345,18 @@ def _http_post_json(url, obj, timeout=4):
         return json.loads(r.read().decode())
 
 
+def _current_ip():
+    with _lock:
+        return (_state.get("device_ip") or "").strip()
+
+
 def _next_gif_id():
     global _gif_counter
+    ip = _current_ip()
+    if not ip:
+        raise RuntimeError("未配置 Pixoo 设备 IP，请在网页上设置")
     try:
-        resp = _http_post_json(f"http://{PIXOO_IP}/post", {"Command": "Draw/GetHttpGifId"})
+        resp = _http_post_json(f"http://{ip}/post", {"Command": "Draw/GetHttpGifId"})
         if resp.get("error_code") == 0:
             return int(resp["PicId"])
     except Exception:
@@ -354,9 +370,12 @@ def push_animation(frames, speed):
     last_err = None
     for attempt in range(2):
         try:
+            ip = _current_ip()
+            if not ip:
+                raise RuntimeError("未配置 Pixoo 设备 IP，请在网页上设置")
             pic_id = _next_gif_id()
             for i, frame in enumerate(frames):
-                resp = _http_post_json(f"http://{PIXOO_IP}/post", {
+                resp = _http_post_json(f"http://{ip}/post", {
                     "Command": "Draw/SendHttpGif",
                     "PicNum": len(frames),
                     "PicWidth": W,
@@ -382,6 +401,8 @@ def load_state():
         if data.get("status") in VALID_STATUSES:
             _state["status"] = data["status"]
         _state["pattern"] = int(data.get("pattern", 0))
+        if data.get("device_ip"):
+            _state["device_ip"] = str(data["device_ip"]).strip()
     except Exception:
         pass
 
@@ -417,6 +438,50 @@ def push_pattern(status, index):
 def apply_status(status):
     """切换状态并立即推送该状态的第一套图案。"""
     return push_pattern(status, 0)
+
+
+def apply_device_ip(ip):
+    """保存设备 IP 并立即推送当前状态验证连通性。"""
+    ip = ip.strip()
+    with _lock:
+        _state["device_ip"] = ip
+    save_state()
+    if not ip:
+        with _lock:
+            _state["device_ok"] = False
+        save_state()
+        return False, "IP 不能为空"
+    with _lock:
+        status = _state["status"]
+        index = _state["pattern"]
+    try:
+        ok, name = push_pattern(status, index)
+        return ok, None
+    except Exception as e:
+        with _lock:
+            _state["device_ok"] = False
+        save_state()
+        return False, str(e)
+
+
+def trigger_update():
+    """把网页“检查更新”按钮转发给 Watchtower 的 HTTP API。"""
+    if not UPDATE_URL:
+        return {"enabled": False, "message": "未启用更新按钮（仅 Docker 部署支持）"}
+    try:
+        req = urllib.request.Request(
+            UPDATE_URL,
+            method="POST",
+            headers={"Authorization": f"Bearer {UPDATE_TOKEN}"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as r:
+            body = r.read().decode("utf-8", "replace")
+            return {"enabled": True, "status": r.status, "result": body}
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        return {"enabled": True, "status": e.code, "result": body}
+    except Exception as e:
+        return {"enabled": True, "status": 0, "result": str(e)}
 
 
 def save_preview(img):
@@ -475,6 +540,20 @@ HTML_PAGE = """<!DOCTYPE html>
   button:active { transform: scale(.96); }
   button.busy { background: linear-gradient(160deg, var(--busy), var(--busy-dim)); }
   button.free { background: linear-gradient(160deg, var(--free), var(--free-dim)); }
+  .settings { display: flex; gap: 10px; margin: 16px 0 4px; }
+  .settings input {
+    flex: 1; min-width: 0; background: #0e1122; border: 1px solid var(--line);
+    border-radius: 10px; color: #eef1ff; padding: 9px 12px; font-size: 14px;
+    font-family: inherit; outline: none;
+  }
+  .settings input:focus { border-color: #4a5aa8; }
+  button.small {
+    flex: 0 0 auto; border: 1px solid var(--line); background: #232946;
+    color: #cdd3f5; border-radius: 10px; padding: 9px 14px; cursor: pointer;
+    font-size: 13px; font-family: inherit; transition: filter .12s ease;
+  }
+  button.small:hover { filter: brightness(1.25); }
+  .update-msg { color: #8b91b4; font-size: 12px; min-height: 16px; margin: 2px 0 10px; }
   .status-line { display: flex; align-items: center; gap: 10px; font-size: 14px; }
   .dot { width: 10px; height: 10px; border-radius: 50%; background: #666; }
   .dot.busy { background: var(--busy); box-shadow: 0 0 12px var(--busy); }
@@ -504,8 +583,14 @@ HTML_PAGE = """<!DOCTYPE html>
     <button class="busy" onclick="setStatus('busy')">请勿打扰</button>
     <button class="free" onclick="setStatus('free')">可以找我</button>
   </div>
+  <div class="settings">
+    <input id="ip" placeholder="Pixoo 设备 IP，例如 192.168.1.100" spellcheck="false">
+    <button class="small" onclick="saveIp()">保存设备</button>
+    <button class="small" id="updBtn" onclick="checkUpdate()" style="display:none">检查更新</button>
+  </div>
+  <div class="update-msg" id="updMsg"></div>
   <div class="preview"><img id="preview" src="/preview.png" alt="Pixoo 预览"></div>
-  <div class="meta">图案每 15 秒自动轮换 · 局域网内任意设备都能修改状态</div>
+  <div class="meta">图案每 15 秒自动轮换 · 局域网内任意设备都能修改状态 · NAS 每 12 小时自动检查更新</div>
 </div>
 <script>
   let cur = null;
@@ -516,16 +601,58 @@ HTML_PAGE = """<!DOCTYPE html>
       cur = s.status;
       const dot = document.getElementById('dot');
       dot.className = 'dot ' + (s.device_ok ? cur : 'offline');
-      document.getElementById('label').textContent =
-        cur === 'busy' ? '请勿打扰' : '可以找我';
-      document.getElementById('device').textContent =
-        s.device_ok ? 'Pixoo 已同步' : 'Pixoo 离线';
+      if (!s.device_ip) {
+        document.getElementById('label').textContent = '未配置设备 IP';
+        document.getElementById('device').textContent = '请在下方填写';
+      } else {
+        document.getElementById('label').textContent =
+          cur === 'busy' ? '请勿打扰' : '可以找我';
+        document.getElementById('device').textContent =
+          s.device_ok ? 'Pixoo 已同步' : 'Pixoo 离线';
+      }
       const p = s.pattern;
       document.getElementById('pattern').textContent =
         '当前图案：' + p.name + '（' + (p.index + 1) + '/' + p.total + '）';
+      const ipEl = document.getElementById('ip');
+      if (document.activeElement !== ipEl) ipEl.value = s.device_ip || '';
+      document.getElementById('updBtn').style.display =
+        s.update_enabled ? '' : 'none';
       const pv = document.getElementById('preview');
       pv.src = '/preview.png?t=' + Date.now();
     } catch (e) { /* ignore */ }
+  }
+  async function saveIp() {
+    const ip = document.getElementById('ip').value.trim();
+    const msg = document.getElementById('updMsg');
+    if (!ip) { msg.textContent = '请填写设备 IP'; return; }
+    try {
+      const r = await fetch('/api/device', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ip: ip})
+      });
+      const s = await r.json();
+      msg.textContent = s.ok ? '设备已保存并同步' : '保存失败：' + (s.error || '无法连接设备');
+    } catch (e) { msg.textContent = '请求失败'; }
+    refresh();
+  }
+  async function checkUpdate() {
+    const msg = document.getElementById('updMsg');
+    msg.textContent = '正在检查更新…';
+    try {
+      const r = await fetch('/api/update', {method: 'POST'});
+      const s = await r.json();
+      if (s.enabled && s.result) {
+        try {
+          const j = JSON.parse(s.result);
+          msg.textContent = (j.message || j.error || '已检查') + (s.status ? '（' + s.status + '）' : '');
+        } catch (e) {
+          msg.textContent = s.result;
+        }
+      } else {
+        msg.textContent = s.message || '未启用更新按钮';
+      }
+    } catch (e) { msg.textContent = '请求失败'; }
   }
   async function setStatus(st) {
     if (st === cur) return;
@@ -562,6 +689,7 @@ class Handler(BaseHTTPRequestHandler):
         with _lock:
             status = _state["status"]
             device_ok = _state["device_ok"]
+            device_ip = _state.get("device_ip", "")
         if self.path in ("/", "/index.html"):
             self._send(200, HTML_PAGE, "text/html; charset=utf-8")
         elif self.path.startswith("/preview.png"):
@@ -574,37 +702,51 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, json.dumps({
                 "status": status, "device_ok": device_ok,
                 "pattern": pattern_info(status),
+                "device_ip": device_ip,
+                "update_enabled": bool(UPDATE_URL),
             }))
         else:
             self._send(404, json.dumps({"error": "not found"}))
 
     def do_POST(self):
-        if self.path != "/api/status":
-            self._send(404, json.dumps({"error": "not found"}))
-            return
         try:
             length = int(self.headers.get("Content-Length", 0))
             req = json.loads(self.rfile.read(length) or b"{}")
         except Exception:
             self._send(400, json.dumps({"error": "bad json"}))
             return
-        status = req.get("status")
-        if status not in VALID_STATUSES:
-            self._send(400, json.dumps({"error": "status must be busy or free"}))
-            return
-        try:
-            ok, name = apply_status(status)
-        except Exception as e:
-            ok, name = False, None
+
+        if self.path == "/api/status":
+            status = req.get("status")
+            if status not in VALID_STATUSES:
+                self._send(400, json.dumps({"error": "status must be busy or free"}))
+                return
+            try:
+                ok, name = apply_status(status)
+            except Exception as e:
+                ok, name = False, None
+                with _lock:
+                    _state["device_ok"] = False
+                save_state()
             with _lock:
-                _state["device_ok"] = False
-            save_state()
-        with _lock:
-            device_ok = _state["device_ok"]
-        self._send(200, json.dumps({
-            "ok": ok, "status": status, "device_ok": device_ok,
-            "pattern": pattern_info(status),
-        }))
+                device_ok = _state["device_ok"]
+            self._send(200, json.dumps({
+                "ok": ok, "status": status, "device_ok": device_ok,
+                "pattern": pattern_info(status),
+            }))
+        elif self.path == "/api/device":
+            ip = req.get("ip", "")
+            ok, err = apply_device_ip(ip)
+            with _lock:
+                device_ok = _state["device_ok"]
+            self._send(200, json.dumps({
+                "ok": ok, "device_ok": device_ok,
+                "device_ip": ip.strip(), "error": err,
+            }))
+        elif self.path == "/api/update":
+            self._send(200, json.dumps(trigger_update()))
+        else:
+            self._send(404, json.dumps({"error": "not found"}))
 
 
 def lan_ip():
@@ -621,14 +763,20 @@ def lan_ip():
 def main():
     load_state()
     print("Pixoo 状态看板 v2")
-    print(f"  设备:  {PIXOO_IP}")
     with _lock:
         status = _state["status"]
-    try:
-        ok, name = apply_status(status)
-        print(f"  同步:  {STATUS_TEXT[status]} - {name} {'成功' if ok else '失败'}")
-    except Exception as e:
-        print(f"  同步:  失败 - {e}")
+        device_ip = _state.get("device_ip", "")
+    if device_ip:
+        print(f"  设备:  {device_ip}")
+        try:
+            ok, name = apply_status(status)
+            print(f"  同步:  {STATUS_TEXT[status]} - {name} {'成功' if ok else '失败'}")
+        except Exception as e:
+            print(f"  同步:  失败 - {e}")
+            with _lock:
+                _state["device_ok"] = False
+    else:
+        print("  设备:  未配置（请在网页上填写 Pixoo 设备 IP）")
         with _lock:
             _state["device_ok"] = False
     threading.Thread(target=_rotator, daemon=True).start()
