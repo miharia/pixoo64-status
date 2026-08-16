@@ -1,0 +1,37 @@
+services:
+  pixoo-status:
+    # CI 自动构建推送的镜像；NAS 每次启动会拉取最新版
+    image: ghcr.io/miharia/pixoo64-status:latest
+    # 想在 NAS 上本地构建（不依赖 GitHub）时，注释掉上面 image 行，
+    # 取消下面两行注释：
+    # build: .
+    # image: pixoo-status:local
+    container_name: pixoo-status
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # 改成你的 Pixoo64 在局域网里的 IP（示例值）
+      PIXOO_IP: "192.168.1.100"
+      STATUS_PORT: "8000"
+      # 图案轮播间隔（秒）
+      STATUS_ROTATE: "15"
+      TZ: "Asia/Shanghai"
+    volumes:
+      # 状态和预览图持久化到宿主机 ./data 目录
+      - ./data:/app/data
+    labels:
+      # 只让 Watchtower 自动更新本服务
+      - "com.centurylinklabs.watchtower.enable=true"
+
+  # 自动更新器：每 60 秒检查 ghcr.io 上的新镜像，有更新就拉取并重启
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    environment:
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_POLL_INTERVAL: "60"
+      WATCHTOWER_LABEL_ENABLE: "true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock

@@ -1,0 +1,9 @@
+.git
+.gitignore
+.dockerignore
+README.md
+hello_nancy.py
+data
+__pycache__
+*.png
+status.json

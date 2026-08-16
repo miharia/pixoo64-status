@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+
+# 运行时状态与预览图
+status.json
+status_preview.png
+status_busy.png
+status_free.png
+hello_nancy_64.png
+hello_nancy_preview.png
+
+# Docker 数据卷
+data/
