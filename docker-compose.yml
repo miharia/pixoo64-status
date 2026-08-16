@@ -36,8 +36,12 @@ services:
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_POLL_INTERVAL: "43200"
       WATCHTOWER_LABEL_ENABLE: "true"
+      # 启用 HTTP API，供网页“检查更新”按钮调用
+      WATCHTOWER_HTTP_API_UPDATE: "true"
       WATCHTOWER_HTTP_API_PERIODIC_POLLS: "true"
       WATCHTOWER_HTTP_API_TOKEN: "${UPDATE_TOKEN:-pixoo-status-update}"
       WATCHTOWER_HTTP_API_PORT: "8080"
+      # 修复：新 Docker（≥29）最低要求 API 1.40，watchtower 默认卡在 1.25
+      DOCKER_API_VERSION: "1.44"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
