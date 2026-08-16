@@ -410,6 +410,19 @@ def _pixoo_command(variants, timeout=4, ip=None):
     raise RuntimeError(f"device error: {last}")
 
 
+def _cmd_retry(variants, tries=3, delay=0.6, timeout=4):
+    """设备对紧跟动画的命令偶尔会静默丢弃/无响应，幂等命令多试几次。"""
+    last = None
+    for i in range(tries):
+        try:
+            return _pixoo_command(variants, timeout=timeout)
+        except Exception as e:
+            last = e
+            if i < tries - 1:
+                time.sleep(delay)
+    raise last
+
+
 def _is_night(start, end):
     """判断当前时间是否落在夜间区间（支持跨零点，如 22:00-08:00）。"""
     def to_min(s):
@@ -445,7 +458,7 @@ def _apply_settings(force=False):
         auto = dict(_state.get("auto", {}))
         touched = set(_state.get("settings_touched", []))
     if not ip:
-        return
+        return ["device_ip"]
     if auto.get("enabled"):
         night = _is_night(auto.get("night_start", "22:00"), auto.get("night_end", "08:00"))
         if night and auto.get("night_off"):
@@ -507,6 +520,7 @@ def _apply_settings(force=False):
         ("Device/SetTempUnit", {"Unit": _clamp(settings.get("temp_unit", 0), 0, 1)}),
     ])
 
+    failed = []
     for key, variants in specs:
         sig = f"{key}:{ip}"
         if not force and _applied_settings.get(sig) == variants:
@@ -518,6 +532,7 @@ def _apply_settings(force=False):
         want = variants[0][1].get(param_key) if param_key else None
         # 设备刚收完动画帧时偶尔会静默丢命令（返回 error_code 0 但没生效），
         # 所以下发后回读设备配置验证，不一致就稍等重试
+        ok = False
         for attempt in range(4):
             try:
                 _pixoo_command(variants, ip=ip)
@@ -527,14 +542,19 @@ def _apply_settings(force=False):
                         f"http://{ip}/post", {"Command": "Channel/GetAllConf"})
                     if resp.get(conf_key) == want:
                         _applied_settings[sig] = variants
+                        ok = True
                         break
                 else:
                     _applied_settings[sig] = variants
+                    ok = True
                     break
             except Exception:
                 pass
             if attempt < 3:
                 time.sleep(0.8)
+        if not ok:
+            failed.append(key)
+    return failed
 
 
 def _next_text_id():
@@ -560,7 +580,30 @@ def start_notify(text, color="#FFFFFF", speed=4, duration=10):
             "sent": False,
         }
     save_state()
-    return True, None
+    # 通知文字只在绘图模式生效：如果正在倒计时/秒表/比分板，先切回图案
+    with _lock:
+        mode = _state.get("mode", "pattern")
+    if mode != "pattern":
+        try:
+            back_to_pattern()
+        except Exception:
+            pass
+    # 立即尝试发送，失败也要如实告诉用户（后台仍会每秒自动重试）
+    try:
+        _cmd_retry([("Draw/SendHttpText", {
+            "TextId": _next_text_id(),
+            "x": 0, "y": 24, "dir": 1, "font": 4,
+            "TextWidth": 64, "speed": _clamp(speed, 1, 20),
+            "TextString": text,
+            "color": color if str(color).startswith("#") else "#FFFFFF",
+            "align": 1,
+        })])
+        with _lock:
+            _state["notify"]["sent"] = True
+        save_state()
+        return True, None
+    except Exception as e:
+        return False, f"设备无响应，稍后自动重试：{e}"
 
 
 def cancel_notify():
@@ -568,7 +611,7 @@ def cancel_notify():
         _state["notify"] = None
     save_state()
     try:
-        _pixoo_command([("Draw/ClearHttpText", {})])
+        _cmd_retry([("Draw/ClearHttpText", {})], tries=2)
     except Exception:
         pass
 
@@ -581,7 +624,7 @@ def start_countdown(seconds):
         _state["countdown"] = {"total": seconds, "until": time.time() + seconds}
     save_state()
     m, s = divmod(seconds, 60)
-    _pixoo_command([
+    _cmd_retry([
         ("Tools/SetTimer", {"Minute": m, "Second": s, "Status": 1}),
         ("Tool/SetCountDown", {"CountDownTime": seconds}),
     ])
@@ -594,10 +637,10 @@ def cancel_countdown():
         _state["countdown"] = None
     save_state()
     try:
-        _pixoo_command([
+        _cmd_retry([
             ("Tools/SetTimer", {"Minute": 0, "Second": 0, "Status": 0}),
             ("Tool/SetCountDown", {"CountDownTime": 0}),
-        ])
+        ], tries=2)
     except Exception:
         pass
     _restore_pattern()
@@ -608,26 +651,33 @@ def stopwatch_action(action):
     with _lock:
         running = _state.get("stopwatch_running", False)
     if action == "start":
-        _pixoo_command([
+        _cmd_retry([
             ("Tools/SetStopWatch", {"Status": 1}),
             ("Tool/SetStopWatch", {"StopWatchStatus": 1}),
         ])
         with _lock:
             _state["stopwatch_running"] = True
+            _state["mode"] = "stopwatch"
     elif action == "stop":
-        _pixoo_command([
+        _cmd_retry([
             ("Tools/SetStopWatch", {"Status": 0}),
             ("Tool/SetStopWatch", {"StopWatchStatus": 0}),
         ])
         with _lock:
             _state["stopwatch_running"] = False
+            _state["mode"] = "stopwatch"
     elif action == "reset":
         try:
-            _pixoo_command([("Tools/SetStopWatch", {"Status": 2})])
+            _cmd_retry([("Tools/SetStopWatch", {"Status": 2})], tries=2)
+        except Exception:
+            pass
+        try:
+            _cmd_retry([("Tools/SetStopWatch", {"Status": 0})], tries=2)
         except Exception:
             pass
         with _lock:
             _state["stopwatch_running"] = False
+            _state["mode"] = "stopwatch"
     else:
         return False, "action 必须是 start/stop/reset"
     save_state()
@@ -636,7 +686,7 @@ def stopwatch_action(action):
 
 def set_scoreboard(blue, red):
     blue, red = _clamp(blue, 0, 999), _clamp(red, 0, 999)
-    _pixoo_command([
+    _cmd_retry([
         ("Tools/SetScoreBoard", {"BlueScore": blue, "RedScore": red}),
         ("Tool/SetScoreBoard", {"Blue": blue, "Red": red}),
     ])
@@ -649,7 +699,7 @@ def set_scoreboard(blue, red):
 
 def play_buzzer(on_ms=500, off_ms=500, total_ms=1500):
     """蜂鸣器响几声（固件每个 beep 约 50ms，过短的参数可能不响）。"""
-    _pixoo_command([
+    _cmd_retry([
         ("Device/PlayBuzzer", {
             "ActiveTime": _clamp(on_ms, 100, 60000),
             "OffTime": _clamp(off_ms, 100, 60000),
@@ -702,6 +752,7 @@ def back_to_pattern():
         index = _state["pattern"]
         _state["mode"] = "pattern"
         _state["countdown"] = None
+        _state["stopwatch_running"] = False
     save_state()
     return push_pattern(status, index)
 
@@ -734,6 +785,12 @@ def push_animation(frames, speed):
             ip = _current_ip()
             if not ip:
                 raise RuntimeError("未配置 Pixoo 设备 IP，请在网页上设置")
+            # 先重置 GIF 计数，防止固件连续接收 ~300 帧后卡死
+            try:
+                _http_post_json(
+                    f"http://{ip}/post", {"Command": "Draw/ResetHttpGifId"})
+            except Exception:
+                pass
             pic_id = _next_gif_id()
             for i, frame in enumerate(frames):
                 resp = _http_post_json(f"http://{ip}/post", {
@@ -1014,43 +1071,58 @@ def update_config(settings=None, auto=None):
             for k, v in settings.items():
                 if k not in SETTING_KEYS:
                     continue
-                if k == "brightness":
-                    v = _clamp(v, 0, 100)
-                elif k == "rotation":
-                    v = max(0, min(3, round(int(v) / 90))) * 90
-                elif k == "white_balance":
-                    if not (isinstance(v, (list, tuple)) and len(v) == 3):
-                        continue
-                    v = [_clamp(x, 0, 255) for x in v]
-                elif k in ("mirror", "screen_on", "high_light"):
-                    v = bool(v)
-                elif k == "hour_mode":
-                    v = 24 if int(v) == 24 else 12
-                elif k == "temp_unit":
-                    v = 1 if int(v) else 0
+                try:
+                    if k == "brightness":
+                        v = _clamp(v, 0, 100)
+                    elif k == "rotation":
+                        v = max(0, min(3, round(int(v) / 90))) * 90
+                    elif k == "white_balance":
+                        if not (isinstance(v, (list, tuple)) and len(v) == 3):
+                            continue
+                        v = [_clamp(x, 0, 255) for x in v]
+                    elif k in ("mirror", "screen_on", "high_light"):
+                        v = bool(v)
+                    elif k == "hour_mode":
+                        v = 24 if int(v) == 24 else 12
+                    elif k == "temp_unit":
+                        v = 1 if int(v) else 0
+                except (TypeError, ValueError):
+                    # 非法值直接忽略，不让整个请求 500
+                    continue
                 cur_s[k] = v
                 touched.add(k)
         if isinstance(auto, dict):
             for k, v in auto.items():
                 if k not in AUTO_KEYS:
                     continue
-                if k == "enabled":
-                    v = bool(v)
-                elif k == "night_off":
-                    v = bool(v)
-                elif k in ("day_brightness", "night_brightness"):
-                    v = _clamp(v, 0, 100)
-                else:
-                    v = str(v)
+                try:
+                    if k == "enabled":
+                        v = bool(v)
+                    elif k == "night_off":
+                        v = bool(v)
+                    elif k in ("day_brightness", "night_brightness"):
+                        v = _clamp(v, 0, 100)
+                    else:
+                        v = str(v)
+                except (TypeError, ValueError):
+                    continue
                 cur_a[k] = v
         _state["settings_touched"] = sorted(touched)
     save_state()
     try:
-        _apply_settings()
-        err = None
+        failed = _apply_settings() or []
     except Exception as e:
-        err = str(e)
-    return public_state(), err
+        return public_state(), str(e)
+    if "device_ip" in failed:
+        return public_state(), "未配置 Pixoo 设备 IP"
+    if failed:
+        names = {
+            "brightness": "亮度", "screen_on": "屏幕", "rotation": "旋转",
+            "mirror": "镜像", "white_balance": "白平衡", "high_light": "高亮",
+            "hour_mode": "小时制", "temp_unit": "温度单位",
+        }
+        return public_state(), "部分设置未生效：" + "、".join(names.get(k, k) for k in failed)
+    return public_state(), None
 
 
 # ---------------------------------------------------------------- Web 页面
@@ -1612,7 +1684,10 @@ class Handler(BaseHTTPRequestHandler):
                 "device_ip": ip.strip(), "error": err,
             }))
         elif self.path == "/api/config":
-            state, err = update_config(req.get("settings"), req.get("auto"))
+            try:
+                state, err = update_config(req.get("settings"), req.get("auto"))
+            except Exception as e:
+                state, err = public_state(), str(e)
             self._send(200, json.dumps({"ok": err is None, "error": err, "state": state}))
         elif self.path == "/api/notify":
             ok, err = start_notify(
